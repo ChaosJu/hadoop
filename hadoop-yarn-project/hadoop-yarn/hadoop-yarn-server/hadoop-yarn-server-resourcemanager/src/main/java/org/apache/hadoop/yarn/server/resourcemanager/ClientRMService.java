@@ -670,6 +670,11 @@ public class ClientRMService extends AbstractService implements
             YarnConfiguration.APPLICATION_TYPE_LENGTH));
       }
     }
+    LOG.info("priority "+ submissionContext.getPriority());
+    if (submissionContext.getPriority() == null) {
+      submissionContext.setPriority(
+          YarnConfiguration.DEFAULT_APPLICATION_PRIORITY);
+    }
 
     ReservationId reservationId = request.getApplicationSubmissionContext()
             .getReservationID();

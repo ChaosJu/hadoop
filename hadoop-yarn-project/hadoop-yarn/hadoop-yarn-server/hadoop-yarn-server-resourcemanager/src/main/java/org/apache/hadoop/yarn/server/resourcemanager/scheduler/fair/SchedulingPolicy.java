@@ -22,6 +22,7 @@ import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.PriorityFairSharePolicy;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.DominantResourceFairnessPolicy;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.FairSharePolicy;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.FifoPolicy;
@@ -87,7 +88,6 @@ public abstract class SchedulingPolicy {
    * @throws AllocationConfigurationException for any errors.
    *
    */
-  @SuppressWarnings("unchecked")
   public static SchedulingPolicy parse(String policy)
       throws AllocationConfigurationException {
     @SuppressWarnings("rawtypes")
@@ -97,6 +97,8 @@ public abstract class SchedulingPolicy {
       clazz = FairSharePolicy.class;
     } else if (text.equalsIgnoreCase(FifoPolicy.NAME)) {
       clazz = FifoPolicy.class;
+    } else if (text.equalsIgnoreCase(PriorityFairSharePolicy.NAME)) {
+      clazz = PriorityFairSharePolicy.class;
     } else if (text.equalsIgnoreCase(DominantResourceFairnessPolicy.NAME)) {
       clazz = DominantResourceFairnessPolicy.class;
     } else {

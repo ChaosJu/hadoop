@@ -41,6 +41,7 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.util.BasicDiskValidator;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
+import org.apache.hadoop.yarn.api.records.Priority;
 
 @Public
 @Evolving
@@ -1129,6 +1130,12 @@ public class YarnConfiguration extends Configuration {
   
   /** Default queue name */
   public static final String DEFAULT_QUEUE_NAME = "default";
+
+  /** Default application priority */
+  public static final Priority DEFAULT_APPLICATION_PRIORITY = Priority.newInstance(1);
+
+  /** Default high application priority */
+  public static final Priority APPLICATION_HIGH_PRIORITY = Priority.newInstance(100);
 
   /**
    * Buckets (in minutes) for the number of apps running in each queue.

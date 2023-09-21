@@ -128,6 +128,8 @@ public class RMAppImpl implements RMApp, Recoverable {
   private static final String RECOVERY_MESSAGE =
       "Recovering app: %s with %d attempts and final state = %s";
 
+  private static final String WAIT_TIME_PREFIX = "taskwaittimesec=";
+
   // Immutable fields
   private final ApplicationId applicationId;
   private final RMContext rmContext;
@@ -197,6 +199,8 @@ public class RMAppImpl implements RMApp, Recoverable {
   Object transitionTodo;
 
   private Priority applicationPriority;
+
+  private Integer waitTime;
 
   private static final StateMachineFactory<RMAppImpl,
                                            RMAppState,
@@ -467,6 +471,7 @@ public class RMAppImpl implements RMApp, Recoverable {
       // considered as normal.
       this.applicationPriority = Priority.newInstance(0);
     }
+    this.waitTime = getWaitTimeFromApplicationTag(applicationTags);
 
     int globalMaxAppAttempts = conf.getInt(
         YarnConfiguration.GLOBAL_RM_AM_MAX_ATTEMPTS,
@@ -1149,7 +1154,7 @@ public class RMAppImpl implements RMApp, Recoverable {
       if (app.attempts.isEmpty()) {
         app.scheduler.handle(
             new AppAddedSchedulerEvent(app.user, app.submissionContext, false,
-                app.applicationPriority, app.placementContext));
+                app.applicationPriority, app.placementContext, app.waitTime));
         return RMAppState.SUBMITTED;
       }
 
@@ -1157,7 +1162,7 @@ public class RMAppImpl implements RMApp, Recoverable {
       // knows applications before AM or NM re-registers.
       app.scheduler.handle(
           new AppAddedSchedulerEvent(app.user, app.submissionContext, true,
-              app.applicationPriority, app.placementContext));
+              app.applicationPriority, app.placementContext, app.waitTime));
 
       // recover attempts
       app.recoverAppAttempts();
@@ -1175,7 +1180,7 @@ public class RMAppImpl implements RMApp, Recoverable {
     public void transition(RMAppImpl app, RMAppEvent event) {
       app.handler.handle(
           new AppAddedSchedulerEvent(app.user, app.submissionContext, false,
-              app.applicationPriority, app.placementContext));
+              app.applicationPriority, app.placementContext, app.waitTime));
       // send the ATS create Event
       app.sendATSCreateEvent();
     }
@@ -1919,5 +1924,21 @@ public class RMAppImpl implements RMApp, Recoverable {
   public String getRealUser() {
     UserGroupInformation realUserUgi = this.userUgi.getRealUser();
     return (realUserUgi != null) ? realUserUgi.getShortUserName() : null;
+  }
+
+  private Integer getWaitTimeFromApplicationTag(Set<String> applicationTags) {
+    try {
+      for (String tag : applicationTags) {
+        if (tag.startsWith(WAIT_TIME_PREFIX)) {
+          String[] userIdTag = tag.split("=");
+          if (userIdTag.length == 2) {
+            return Integer.parseInt(userIdTag[1]);
+          }
+        }
+      }
+    } catch (Exception e) {
+      LOG.error("getWaitTimeFromApplicationTag error" + e);
+    }
+    return 0;
   }
 }

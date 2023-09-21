@@ -34,22 +34,23 @@ public class AppAddedSchedulerEvent extends SchedulerEvent {
   private final boolean isAppRecovering;
   private final Priority appPriority;
   private final ApplicationPlacementContext placementContext;
+  private final Integer waitTime;
 
   public AppAddedSchedulerEvent(ApplicationId applicationId, String queue,
       String user) {
     this(applicationId, queue, user, false, null, Priority.newInstance(0),
-        null);
+        null, 0);
   }
 
   public AppAddedSchedulerEvent(ApplicationId applicationId, String queue,
       String user, ApplicationPlacementContext placementContext) {
     this(applicationId, queue, user, false, null, Priority.newInstance(0),
-        placementContext);
+        placementContext, 0);
   }
 
   public AppAddedSchedulerEvent(ApplicationId applicationId, String queue,
       String user, ReservationId reservationID, Priority appPriority) {
-    this(applicationId, queue, user, false, reservationID, appPriority, null);
+    this(applicationId, queue, user, false, reservationID, appPriority, null, 0);
   }
 
   public AppAddedSchedulerEvent(String user,
@@ -57,7 +58,7 @@ public class AppAddedSchedulerEvent extends SchedulerEvent {
       Priority appPriority) {
     this(submissionContext.getApplicationId(), submissionContext.getQueue(),
         user, isAppRecovering, submissionContext.getReservationID(),
-        appPriority, null);
+        appPriority, null, 0);
   }
 
   public AppAddedSchedulerEvent(String user,
@@ -65,12 +66,20 @@ public class AppAddedSchedulerEvent extends SchedulerEvent {
       Priority appPriority, ApplicationPlacementContext placementContext) {
     this(submissionContext.getApplicationId(), submissionContext.getQueue(),
         user, isAppRecovering, submissionContext.getReservationID(),
-        appPriority, placementContext);
+        appPriority, placementContext, 0);
+  }
+
+  public AppAddedSchedulerEvent(String user,
+      ApplicationSubmissionContext submissionContext, boolean isAppRecovering,
+      Priority appPriority, ApplicationPlacementContext placementContext, Integer waitTime) {
+    this(submissionContext.getApplicationId(), submissionContext.getQueue(),
+        user, isAppRecovering, submissionContext.getReservationID(),
+        appPriority, placementContext, waitTime);
   }
 
   public AppAddedSchedulerEvent(ApplicationId applicationId, String queue,
       String user, boolean isAppRecovering, ReservationId reservationID,
-      Priority appPriority, ApplicationPlacementContext placementContext) {
+      Priority appPriority, ApplicationPlacementContext placementContext, Integer waitTime) {
     super(SchedulerEventType.APP_ADDED);
     this.applicationId = applicationId;
     this.queue = queue;
@@ -79,6 +88,7 @@ public class AppAddedSchedulerEvent extends SchedulerEvent {
     this.isAppRecovering = isAppRecovering;
     this.appPriority = appPriority;
     this.placementContext = placementContext;
+    this.waitTime = waitTime;
   }
 
   public ApplicationId getApplicationId() {
@@ -107,5 +117,9 @@ public class AppAddedSchedulerEvent extends SchedulerEvent {
 
   public ApplicationPlacementContext getPlacementContext() {
     return placementContext;
+  }
+
+  public Integer getWaitTime() {
+    return waitTime;
   }
 }

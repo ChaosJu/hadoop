@@ -22,6 +22,9 @@ import org.apache.hadoop.thirdparty.com.google.common.annotations.VisibleForTest
 import org.apache.hadoop.thirdparty.com.google.common.base.Preconditions;
 import org.apache.hadoop.thirdparty.com.google.common.collect.Lists;
 import org.apache.hadoop.thirdparty.com.google.common.util.concurrent.SettableFuture;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationStateData;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.*;
+import org.apache.hadoop.yarn.server.resourcemanager.security.DelegationTokenRenewer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience.LimitedPrivate;
@@ -62,10 +65,6 @@ import org.apache.hadoop.yarn.server.resourcemanager.RMCriticalThreadUncaughtExc
 import org.apache.hadoop.yarn.server.resourcemanager.placement.ApplicationPlacementContext;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.RMState;
 import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationConstants;
-import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
-import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEvent;
-import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEventType;
-import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
@@ -103,20 +102,16 @@ import org.apache.hadoop.yarn.util.resource.ResourceUtils;
 import org.apache.hadoop.yarn.util.resource.Resources;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.EnumSet;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.Map.Entry;
-import java.util.Set;
-import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.ReadLock;
+
+import static org.apache.hadoop.yarn.conf.YarnConfiguration.APPLICATION_HIGH_PRIORITY;
 
 /**
  * A scheduler that schedules resources between a set of queues. The scheduler
@@ -216,6 +211,8 @@ public class FairScheduler extends
 
   private boolean migration;
   private boolean noTerminalRuleCheck;
+
+  private Timer updatePriorityTimer;
 
   public FairScheduler() {
     super(FairScheduler.class.getName());
@@ -459,6 +456,13 @@ public class FairScheduler extends
     return continuousSchedulingSleepMs;
   }
 
+  protected void addApplication(ApplicationId applicationId,
+      String queueName, String user, boolean isAppRecovering,
+      ApplicationPlacementContext placementContext) {
+    addApplication(applicationId, queueName, user, isAppRecovering,
+        placementContext, Priority.newInstance(1));
+  }
+
   /**
    * Add a new application to the scheduler, with a given id, queue name, and
    * user. This will accept a new app even if the user or queue is above
@@ -472,7 +476,7 @@ public class FairScheduler extends
    */
   protected void addApplication(ApplicationId applicationId,
       String queueName, String user, boolean isAppRecovering,
-      ApplicationPlacementContext placementContext) {
+      ApplicationPlacementContext placementContext, Priority priority) {
     // If the  placement was rejected the placementContext will be null.
     // We ignore placement rules on recovery.
     if (!isAppRecovering && placementContext == null) {
@@ -560,7 +564,7 @@ public class FairScheduler extends
       }
 
       SchedulerApplication<FSAppAttempt> application =
-          new SchedulerApplication<>(queue, user);
+          new SchedulerApplication<>(queue, user, priority);
       applications.put(applicationId, application);
       queue.getMetrics().submitApp(user);
 
@@ -605,7 +609,7 @@ public class FairScheduler extends
       FSLeafQueue queue = (FSLeafQueue) application.getQueue();
 
       FSAppAttempt attempt = new FSAppAttempt(this, applicationAttemptId, user,
-          queue, new ActiveUsersManager(getRootQueueMetrics()), rmContext);
+          queue, new ActiveUsersManager(getRootQueueMetrics()), rmContext, application.getPriority());
       if (transferStateFromPreviousAttempt) {
         attempt.transferStateFromPreviousAttempt(
             application.getCurrentAppAttempt());
@@ -1257,7 +1261,11 @@ public class FairScheduler extends
         addApplication(appAddedEvent.getApplicationId(),
             queueName, appAddedEvent.getUser(),
             appAddedEvent.getIsAppRecovering(),
-            appAddedEvent.getPlacementContext());
+            appAddedEvent.getPlacementContext(),
+            appAddedEvent.getApplicatonPriority());
+      }
+      if(appAddedEvent.getWaitTime() > 0){
+        setTimerForUpdatePriority(appAddedEvent.getWaitTime(), appAddedEvent.getApplicationId());
       }
       break;
     case APP_REMOVED:
@@ -1477,6 +1485,7 @@ public class FairScheduler extends
       if (this.conf.getPreemptionEnabled() && !migration) {
         createPreemptionThread();
       }
+      updatePriorityTimer = new Timer(true);
     } finally {
       writeLock.unlock();
     }
@@ -1566,6 +1575,9 @@ public class FairScheduler extends
       }
       if (allocsLoader != null) {
         allocsLoader.stop();
+      }
+      if (updatePriorityTimer != null) {
+        updatePriorityTimer.cancel();
       }
     } finally {
       writeLock.unlock();
@@ -2026,15 +2038,182 @@ public class FairScheduler extends
   }
 
   @Override
+  public Priority checkAndGetApplicationPriority(
+      Priority priorityRequestedByApp, UserGroupInformation user,
+      String queuePath, ApplicationId applicationId) {
+    readLock.lock();
+    try {
+      Priority appPriority = priorityRequestedByApp;
+
+      // Verify the scenario where priority is null from submissionContext.
+      if (null == appPriority) {
+
+        // Get the default priority for the Queue. If Queue is non-existent,
+        // then
+        // use default priority. Do it only if user doesn't have any default.
+        if (null == appPriority) {
+          appPriority = YarnConfiguration.DEFAULT_APPLICATION_PRIORITY;
+        }
+
+        LOG.info(
+            "Application '" + applicationId + "' is submitted without priority "
+            + "hence considering default cluster priority: "
+            + appPriority.getPriority());
+      }
+
+      // Verify whether submitted priority is lesser than max priority
+      // in the cluster. If it is out of found, defining a max cap.
+      if (appPriority.getPriority() > getMaxClusterLevelAppPriority()
+          .getPriority()) {
+        appPriority = Priority
+            .newInstance(getMaxClusterLevelAppPriority().getPriority());
+      }
+
+      LOG.info("Priority '" + appPriority.getPriority()
+          + "' is acceptable in queue : " + queuePath + " for application: "
+          + applicationId);
+
+      return appPriority;
+    } finally {
+      readLock.unlock();
+    }
+  }
+
+  @Override
   public Priority updateApplicationPriority(Priority newPriority,
       ApplicationId applicationId, SettableFuture<Object> future,
       UserGroupInformation user)
       throws YarnException {
-    throw new YarnException(
-        "Update application priority is not supported in Fair Scheduler");
+    writeLock.lock();
+    try {
+      SchedulerApplication<FSAppAttempt> application = applications
+          .get(applicationId);
+      Priority appPriority = application.getPriority();
+      if (application == null) {
+        throw new YarnException("Application '" + applicationId
+            + "' is not present, hence could not change priority.");
+      }
+
+      RMApp rmApp = rmContext.getRMApps().get(applicationId);
+      //TODO:
+      // max priority check
+      // acl check
+      if (appPriority.equals(newPriority)) {
+        future.set(null);
+        return newPriority;
+      }
+
+      // Update new priority in Submission Context to update to StateStore.
+      rmApp.getApplicationSubmissionContext().setPriority(newPriority);
+
+      // Update to state store
+      ApplicationStateData appState = ApplicationStateData.newInstance(
+          rmApp.getSubmitTime(), rmApp.getStartTime(),
+          rmApp.getApplicationSubmissionContext(), rmApp.getUser(),
+          rmApp.getRealUser(), rmApp.getCallerContext());
+      appState.setApplicationTimeouts(rmApp.getApplicationTimeouts());
+      appState.setLaunchTime(rmApp.getLaunchTime());
+      rmContext.getStateStore().updateApplicationStateSynchronously(appState,
+          false, future);
+      application.setPriority(newPriority);
+
+      LOG.info("Priority '" + newPriority + "' is updated in queue :"
+          + rmApp.getQueue() + " for application: " + applicationId
+          + " for the user: " + rmApp.getUser());
+      return newPriority;
+    } finally {
+      writeLock.unlock();
+    }
   }
 
   public boolean isNoTerminalRuleCheck() {
     return noTerminalRuleCheck;
+  }
+
+  /**
+   * set task to update application priority
+   * @param waitTime wait time seconds.
+   * @param applicationId
+   * @throws IOException if an IO error occurred.
+   */
+  @VisibleForTesting
+  protected void setTimerForUpdatePriority(Integer waitTime, ApplicationId applicationId) {
+
+    // need to create new task every time
+    UpdatePriorityTimerTask tTask = new UpdatePriorityTimerTask(applicationId);
+    //token.setTimerTask(tTask); // keep reference to the timer
+
+    updatePriorityTimer.schedule(tTask, waitTime*1000);
+    LOG.info("Will update application priority  in " + waitTime + " s, appId = "
+        + applicationId);
+  }
+
+  /**
+   * Task - to update application priority
+   *
+   */
+  private class UpdatePriorityTimerTask extends TimerTask {
+    private ApplicationId applicationId;
+    private AtomicBoolean cancelled = new AtomicBoolean(false);
+
+    UpdatePriorityTimerTask(ApplicationId applicationId) {
+      this.applicationId = applicationId;
+    }
+
+    @Override
+    public void run() {
+      if (cancelled.get()) {
+        return;
+      }
+
+      try {
+        RMApp app = rmContext.getRMApps().get(applicationId);
+
+        synchronized (applicationId) {
+          if (app == null || app.isAppInCompletedStates()) {
+            return;
+          }
+          UserGroupInformation callerUGI = UserGroupInformation.getCurrentUser();
+
+          // Create a future object to capture exceptions from StateStore.
+          SettableFuture<Object> future = SettableFuture.create();
+
+          // Invoke scheduler api to update priority in scheduler and to
+          // State Store.
+          Priority appPriority = rmContext.getScheduler().updateApplicationPriority(
+              APPLICATION_HIGH_PRIORITY, applicationId, future, callerUGI);
+
+          if (app.getApplicationPriority().equals(appPriority)) {
+            return;
+          }
+          LOG.info("updated application priority to " + APPLICATION_HIGH_PRIORITY + ", appId = "
+              + applicationId);
+
+          getChecked(future);
+
+          // update in-memory
+          ((RMAppImpl) app).setApplicationPriority(appPriority);
+        }
+      } catch (Exception e) {
+        LOG.error("Exception update application priority", e);
+      }
+    }
+
+    private  <V> V getChecked(Future<V> future) throws YarnException {
+      try {
+        return future.get();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new YarnException(e);
+      } catch (ExecutionException e) {
+        throw new YarnException(e);
+      }
+    }
+
+    @Override
+    public boolean cancel() {
+      cancelled.set(true);
+      return super.cancel();
+    }
   }
 }
